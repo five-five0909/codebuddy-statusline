@@ -1,6 +1,6 @@
 ---
 description: "Adjust statusline display: show/hide blocks, reorder, toggle lines"
-argument-hint: "<hide|show|move|enable|disable|reset|list> [args]"
+argument-hint: "<preset|hide|show|move|enable|disable|reset|list> [args]"
 ---
 
 Invoke as `/statusline:config`. Adjust the statusline layout by running the
@@ -10,8 +10,16 @@ take effect on the next statusline render (no restart needed).
 
 Translate the user's request into one of these commands and run it with Bash:
 
+The default is the fixed compact three-line preset. Block ordering, hiding,
+and Tools/Recent toggles apply only to the detailed preset. Select it explicitly
+before applying those changes; do not claim those controls change compact rows.
+
 ```bash
-# Hide / show blocks (block-level)
+# Choose the preset
+python3 ~/.codebuddy/statusline/config.py preset compact
+python3 ~/.codebuddy/statusline/config.py preset detailed
+
+# Hide / show blocks (block-level, detailed preset)
 python3 ~/.codebuddy/statusline/config.py hide credits time
 python3 ~/.codebuddy/statusline/config.py show credits
 

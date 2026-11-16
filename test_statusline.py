@@ -17,23 +17,81 @@ class TestMainNullSafety(unittest.TestCase):
 
     def setUp(self):
         self._cfg_dir = tempfile.mkdtemp()
+        self._runtime = os.path.join(self._cfg_dir, 'runtime')
+        os.makedirs(self._runtime)
+        for name in ('statusline', 'formatting', 'gitinfo', 'stats', 'parsing', 'render', 'local_metadata'):
+            shutil.copy2(os.path.join(os.path.dirname(__file__), name + '.py'), self._runtime)
 
     def tearDown(self):
         shutil.rmtree(self._cfg_dir, ignore_errors=True)
 
-    def _run_main(self, input_data):
+    def _run_main(self, input_data, env_overrides=None):
         import subprocess
         env = dict(os.environ, CODEBUDDY_CONFIG_DIR=self._cfg_dir)
+        env.update(env_overrides or {})
         result = subprocess.run(
-            [sys.executable, os.path.join(os.path.dirname(__file__), 'statusline.py')],
-            input=json.dumps(input_data),
+            [sys.executable, os.path.join(self._runtime, 'statusline.py')],
+            input=json.dumps(input_data, ensure_ascii=False),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
+            encoding='utf-8',
             timeout=5,
+            cwd=self._cfg_dir,
             env=env,
         )
+        self.assertNotIn('ERR:', result.stdout)
         return result
+
+    def _use_detailed_layout(self):
+        folder = os.path.join(self._cfg_dir, 'plugins', 'data', 'statusline')
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, 'config.json'), 'w', encoding='utf-8') as stream:
+            json.dump({'layout': {'preset': 'detailed'}}, stream)
+
+    def test_default_compact_without_layout_config(self):
+        result = self._run_main({'model': {'display_name': 'TestModel'}, 'terminal_width': 240})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout.splitlines()), 3)
+        self.assertIn('In:', result.stdout.splitlines()[1])
+        self.assertIn('Recent:', result.stdout.splitlines()[2])
+        for hidden in ('Tools:', 'MCP', 'Skill', 'cfg:'):
+            self.assertNotIn(hidden, result.stdout)
+
+    def test_metadata_three_lines(self):
+        self._use_detailed_layout()
+        with open(os.path.join(self._cfg_dir, 'settings.json'), 'w', encoding='utf-8') as stream:
+            json.dump({'reasoningEffort': 'high', 'permissions': {'defaultMode': 'plan'}}, stream)
+        result = self._run_main({'model': {'display_name': 'TestModel'}, 'terminal_width': 240})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 3)
+        self.assertIn('cfg:HIGH', result.stdout)
+        self.assertIn('plan', result.stdout)
+        self.assertIn('MCP(cfg):', result.stdout)
+        self.assertIn('Skill(files):', result.stdout)
+        self.assertFalse(os.path.exists(os.path.join(
+            self._cfg_dir, 'plugins', 'data', 'statusline', 'cache', '.last-update-check')))
+
+    def test_raw_utf8_bytes_under_gbk_default(self):
+        self._use_detailed_layout()
+        import subprocess
+        transcript = os.path.join(self._cfg_dir, '中文记录.jsonl')
+        with open(transcript, 'w', encoding='utf-8') as stream:
+            stream.write(json.dumps({'type': 'function_call', 'name': 'Read'}) + '\n')
+        model = 'GPT-6.1 Sol · 测试 · Remote magpie'
+        payload = {'model': {'display_name': model}, 'transcript_path': transcript,
+                   'workspace': {'current_dir': self._cfg_dir}, 'terminal_width': 240}
+        result = subprocess.run(
+            [sys.executable, os.path.join(self._runtime, 'statusline.py')],
+            input=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+            capture_output=True, cwd=self._cfg_dir, timeout=5,
+            env=dict(os.environ, CODEBUDDY_CONFIG_DIR=self._cfg_dir, PYTHONIOENCODING='gbk'))
+        output = result.stdout.decode('utf-8', errors='strict')
+        self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', errors='replace'))
+        self.assertNotIn('ERR:', output)
+        self.assertIn(model, output)
+        self.assertIn('Read', output.splitlines()[1])
+        self.assertEqual(len(output.splitlines()), 3)
 
     def test_null_cost(self):
         r = self._run_main({"cost": None, "session_id": "t", "transcript_path": ""})
@@ -132,6 +190,7 @@ class TestMainNullSafety(unittest.TestCase):
 
     def test_compact_count_in_output(self):
         """End-to-end: Compact×N and Periodic×M appear separately in statusline output."""
+        self._use_detailed_layout()
         # Create a transcript with compact events
         tmpdir = tempfile.mkdtemp()
         transcript = os.path.join(tmpdir, "compact-test.jsonl")
@@ -183,6 +242,7 @@ class TestMainNullSafety(unittest.TestCase):
 
     def test_compact_periodic_shown_without_used_percentage(self):
         """Compact×N and Periodic×M show even when used_percentage is null (post-compact first call)."""
+        self._use_detailed_layout()
         tmpdir = tempfile.mkdtemp()
         transcript = os.path.join(tmpdir, "no-pct-test.jsonl")
         with open(transcript, 'w') as f:
@@ -220,6 +280,7 @@ class TestMainNullSafety(unittest.TestCase):
 
     def test_lines_display(self):
         """End-to-end: +N/-M shows raw cumulative values from cost."""
+        self._use_detailed_layout()
         r = self._run_main({
             "cost": {"total_lines_added": 100, "total_lines_removed": 30},
             "context_window": {

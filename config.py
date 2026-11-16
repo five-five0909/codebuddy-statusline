@@ -13,6 +13,7 @@ Subcommands:
     move   <block> before <other>
     enable  tools|recent        set a whole-line toggle on
     disable tools|recent        set a whole-line toggle off
+    preset compact|detailed    select the display preset (default: compact)
     reset                      delete the config (next render = defaults)
     list                       print the effective layout
 
@@ -45,7 +46,10 @@ def _load_editable():
     """
     cfg = load_layout_config() or {}
     layout = cfg.get("layout", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(layout, dict):
+        layout = {}
     return {
+        "preset": resolve_layout(cfg)['preset'],
         "line1_order": list(layout.get("line1_order", BLOCKS_LINE1)),
         "line1_hidden": list(layout.get("line1_hidden", [])),
         "tools": bool(layout.get("tools", True)),
@@ -102,6 +106,10 @@ def _move(layout, block, where, other=None):
 def _print_layout(layout):
     resolved = resolve_layout({"layout": layout})
     print("Layout (effective):")
+    print("  preset:      " + resolved['preset'])
+    if resolved['preset'] == 'compact':
+        print("  rows:        project/model/context | tokens/cache/time | recent tokens/speed")
+        print("  Block order and line toggles below apply only to the detailed preset.")
     print("  line1 order: " + " | ".join(resolved["line1_order"]))
     print("  hidden:      " + (", ".join(layout["line1_hidden"]) or "(none)"))
     print("  tools:       " + ("on" if resolved["tools"] else "off"))
@@ -111,7 +119,7 @@ def _print_layout(layout):
 
 def main(argv):
     if len(argv) < 2:
-        _err("usage: config.py <hide|show|move|enable|disable|reset|list> [args]")
+        _err("usage: config.py <preset|hide|show|move|enable|disable|reset|list> [args]")
 
     action = argv[1]
     layout = _load_editable()
@@ -127,6 +135,14 @@ def main(argv):
             print("reset: config deleted, using defaults")
         else:
             print("reset: no config present, already defaults")
+        return
+
+    if action == 'preset':
+        if len(argv) != 3 or argv[2] not in ('compact', 'detailed'):
+            _err('usage: config.py preset compact|detailed')
+        layout['preset'] = argv[2]
+        _write(layout)
+        _print_layout(layout)
         return
 
     if action == "hide":

@@ -30,6 +30,29 @@ class TestConfigHelper(unittest.TestCase):
         with open(self._path, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    def test_default_preset_is_compact(self):
+        self.assertEqual(config_mod._load_editable()['preset'], 'compact')
+        self.assertFalse(os.path.exists(self._path))
+
+    def test_preset_round_trip_and_edits_preserve_it(self):
+        config_mod.main(['config.py', 'preset', 'detailed'])
+        config_mod.main(['config.py', 'hide', 'credits'])
+        self.assertEqual(self._read()['layout']['preset'], 'detailed')
+        config_mod.main(['config.py', 'preset', 'compact'])
+        config_mod.main(['config.py', 'move', 'model', 'front'])
+        self.assertEqual(self._read()['layout']['preset'], 'compact')
+
+    def test_unknown_preset_rejected(self):
+        with self.assertRaises(SystemExit) as error:
+            config_mod.main(['config.py', 'preset', 'unknown'])
+        self.assertEqual(error.exception.code, 2)
+        self.assertFalse(os.path.exists(self._path))
+
+    def test_reset_restores_compact_default(self):
+        config_mod.main(['config.py', 'preset', 'detailed'])
+        config_mod.main(['config.py', 'reset'])
+        self.assertEqual(config_mod._load_editable()['preset'], 'compact')
+
     def test_hide_round_trip(self):
         config_mod.main(["config.py", "hide", "credits", "time"])
         self.assertIn("credits", self._read()["layout"]["line1_hidden"])

@@ -842,5 +842,6 @@ class TestPartialLineRaceCondition(unittest.TestCase):
         self.assertIsNotNone(cache)
         # The offset should be right after the first complete line,
         # NOT past the partial line.
-        first_line_size = len(json.dumps({'type': 'function_call', 'name': 'Bash'}) + '\n')
+        with open(self.transcript_path, 'rb') as f:
+            first_line_size = len(f.readline())
         self.assertEqual(cache["main_offset"], first_line_size)

@@ -14,14 +14,21 @@ Requires Python 3.6+.
 import json
 import sys
 
-# Fix Windows GBK encoding: stdout defaults to GBK on Chinese Windows,
-# which cannot encode Unicode chars like ✓, █, × used in the output.
+# The host sends UTF-8 JSON even when Windows defaults to GBK.
+if sys.stdin and hasattr(sys.stdin, 'reconfigure'):
+    try:
+        sys.stdin.reconfigure(encoding='utf-8', errors='strict')
+    except Exception:
+        pass
+
+# Keep Unicode output independent of the Windows console code page.
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
         pass
 
+import local_metadata
 import parsing
 import render
 import stats
@@ -56,8 +63,13 @@ def main():
         except Exception:
             recent_rate = None
 
+    try:
+        metadata = local_metadata.load_local_metadata(input_data)
+    except Exception:
+        metadata = {}
+
     # Assemble and print the three-line statusline
-    print(render.build_statusline(input_data, stats_dict, recent_rate))
+    print(render.build_statusline(input_data, stats_dict, recent_rate, metadata))
 
     # Auto-update (git-clone mode only, at most once per day, runs detached).
     try:

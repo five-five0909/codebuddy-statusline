@@ -239,11 +239,15 @@ class TestBuildStatuslineConfig(unittest.TestCase):
         self._tmp = tempfile.mkdtemp()
         self._orig_plugin_data = stats._PLUGIN_DATA
         stats._PLUGIN_DATA = self._tmp
+        width_patch = mock.patch('render.get_statusline_width_from_input', return_value=0)
+        width_patch.start()
+        self.addCleanup(width_patch.stop)
 
     def tearDown(self):
         stats._PLUGIN_DATA = self._orig_plugin_data
 
     def _write_config(self, layout):
+        layout = dict(layout, preset='detailed')
         with open(os.path.join(self._tmp, "config.json"), "w") as f:
             json.dump({"layout": layout}, f)
 
@@ -267,8 +271,8 @@ class TestBuildStatuslineConfig(unittest.TestCase):
         }
         return inp, stats
 
-    def test_default_output_unchanged(self):
-        # No config file -> identical to the pre-config build.
+    def test_detailed_output_unchanged(self):
+        self._write_config({})
         inp, stats = self._sample()
         out = build_statusline(inp, stats)
         self.assertIn("claude-sonnet", out)
@@ -493,6 +497,194 @@ class TestRecentRate(unittest.TestCase):
         # A measured 0.0 t/s is still a measurement (not None) -> render it.
         st = {"last_input": 1000, "last_output": 200}
         self.assertIn("Speed:0.0t/s", self._plain(_build_recent_parts({}, st, 0.0)))
+
+
+class TestLocalMetadataRendering(unittest.TestCase):
+    def setUp(self):
+        for target, value in (('render.load_layout_config', {'layout': {'preset': 'detailed'}}),
+                              ('render.get_git_info', None),
+                              ('render.get_statusline_width_from_input', 0)):
+            patcher = mock.patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.metadata = {'reasoning_effort': 'high', 'permission_mode': 'plan',
+                         'mcp_count': 5, 'skill_count': 12,
+                         'cwd': 'E:/中文项目/完整工作目录'}
+
+    def plain(self, inp=None, st=None, metadata=None):
+        output = build_statusline(inp or {'model': {'display_name': 'TestModel'}}, st or {},
+                                  local_metadata=self.metadata if metadata is None else metadata)
+        return re.sub(r'\x1b\[[0-9;]*m', '', output)
+
+    def test_metadata_placement(self):
+        lines = self.plain().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn('cfg:HIGH', lines[0])
+        self.assertIn('cfg:plan', lines[1])
+        self.assertIn('MCP(cfg):5', lines[1])
+        self.assertIn('Skill(files):12', lines[1])
+        self.assertIn(self.metadata['cwd'], lines[1])
+        self.assertIn('Tools: —', lines[1])
+        self.assertEqual(lines[2], 'Recent: —')
+
+    def test_no_metadata_still_three_lines(self):
+        self.assertEqual(len(self.plain(metadata={}).splitlines()), 3)
+
+    def test_hidden_model_hides_effort(self):
+        with mock.patch('render.load_layout_config', return_value={'layout': {'preset': 'detailed', 'line1_hidden': ['model']}}):
+            self.assertNotIn('HIGH', self.plain())
+
+    def test_explicit_line_toggles(self):
+        for tools, recent, count in ((False, True, 2), (True, False, 2), (False, False, 1)):
+            with self.subTest(tools=tools, recent=recent):
+                with mock.patch('render.load_layout_config', return_value={
+                        'layout': {'preset': 'detailed', 'tools': tools, 'recent': recent}}):
+                    output = self.plain()
+                    self.assertEqual(len(output.splitlines()), count)
+                    self.assertEqual('MCP(cfg)' in output, tools)
+                    self.assertEqual('Recent:' in output, recent)
+
+    def test_width_and_tool_budget(self):
+        from formatting import _visible_len
+        self.metadata['cwd'] *= 30
+        for width in (1, 10, 20, 80, 120, 180):
+            with self.subTest(width=width):
+                with mock.patch('render.get_statusline_width_from_input', return_value=width):
+                    output = self.plain(st={'tool_counts': {'Read': 2}})
+                self.assertEqual(len(output.splitlines()), 3)
+                self.assertTrue(all(_visible_len(line) <= max(1, width - 2)
+                                    for line in output.splitlines()))
+                if width >= 80:
+                    self.assertIn('Tools:', output.splitlines()[1])
+                    self.assertIn('Read', output.splitlines()[1])
+                    self.assertIn('In:', output.splitlines()[0])
+
+    def test_detected_width_without_host_field(self):
+        from formatting import _visible_len
+        self.metadata['cwd'] *= 20
+        inp = {'model': {'display_name': '中文模型 · 测试'},
+               'cost': {'total_lines_added': 599, 'total_lines_removed': 32}}
+        st = {'tool_counts': {'Read': 43, 'Write': 3}, 'total_input': 5300000,
+              'total_output': 29600, 'last_input': 1000, 'last_output': 200}
+        with mock.patch('render.get_statusline_width_from_input', wraps=__import__(
+                'formatting').get_statusline_width_from_input), \
+                mock.patch('formatting.get_statusline_width', return_value=100):
+            output = self.plain(inp=inp, st=st)
+        lines = output.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(all(_visible_len(line) <= 98 for line in lines))
+        self.assertIn('中文模型 · 测试', lines[0])
+        self.assertIn('Tools:', lines[1])
+        self.assertTrue(lines[2].startswith('Recent:'))
+
+    def test_unknown_counts(self):
+        self.metadata.update(mcp_count=None, skill_count=None)
+        self.assertIn('MCP(cfg):?', self.plain())
+        self.assertIn('Skill(files):?', self.plain())
+
+    def test_control_characters_removed(self):
+        self.metadata.update(reasoning_effort='high\n\x1b[31m',
+                             permission_mode='plan\r\n', cwd='E:/project\n\x07folder')
+        output = self.plain()
+        self.assertEqual(len(output.splitlines()), 3)
+        self.assertNotIn('\x07', output)
+        self.assertNotIn('\x1b', output)
+
+
+class TestCompactPreset(unittest.TestCase):
+    def setUp(self):
+        self.config = {'layout': {'preset': 'compact'}}
+        for target, value in (('render.load_layout_config', self.config),
+                              ('render.get_git_info', None),
+                              ('render.get_statusline_width_from_input', 0)):
+            patcher = mock.patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.inp = {'workspace': {'current_dir': '/project'},
+                    'model': {'display_name': 'GPT-6.1 Sol · 测试 · Remote magpie'},
+                    'context_window': {'used_percentage': 16, 'context_window_size': 922000,
+                                       'current_usage': {'input_tokens': 149200}},
+                    'cost': {'total_duration_ms': 65000, 'total_cost_usd': 5,
+                             'total_lines_added': 599}}
+        self.st = {'total_input': 10000, 'total_output': 200, 'total_cache_read': 9900,
+                   'total_reasoning': 30, 'request_count': 74, 'total_credits': 100,
+                   'last_input': 1000, 'last_output': 20, 'last_cache_read': 990,
+                   'last_cost': 1, 'last_credits': 2, 'compact_count': 1,
+                   'tool_counts': {'Read': 63},
+                   'recent_calls': [{'name': 'PowerShell', 'summary': 'SECRET COMMAND'}]}
+        self.metadata = {'reasoning_effort': 'high', 'permission_mode': 'bypassPermissions',
+                         'mcp_count': 9, 'skill_count': 52, 'cwd': '/full/private/path'}
+
+    def render(self, rate=21.1):
+        output = build_statusline(self.inp, self.st, rate, self.metadata)
+        return re.sub(r'\x1b\[[0-9;]*m', '', output)
+
+    def test_three_line_whitelist(self):
+        lines = self.render().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn('HIGH', lines[0])
+        self.assertIn('16%', lines[0])
+        self.assertIn('In:10.0K Out:200 Cache:99%', lines[1])
+        self.assertIn('Time:1m5s', lines[1])
+        self.assertEqual(lines[2], 'Recent: In:1.0K Out:20 | Speed:21.1t/s')
+        for unwanted in ('cfg:', 'MCP', 'Skill', '/full/private/path', 'Tools:', 'Read',
+                         'SECRET', 'PowerShell', 'Cost:', 'Credits:', 'Think:', 'Req:', 'Compact', 'Avg:'):
+            self.assertNotIn(unwanted, '\n'.join(lines))
+
+    def test_short_model_and_cjk_width(self):
+        from formatting import _visible_len
+        line = self.render().splitlines()[0]
+        model = line.split(' | ')[1].rsplit(' HIGH', 1)[0]
+        self.assertLessEqual(_visible_len(model), 24)
+        self.assertIn('…', model)
+
+    def test_missing_data_and_nulls(self):
+        self.inp = {'model': None, 'context_window': None, 'cost': None}
+        self.st = {}
+        self.metadata = {}
+        lines = self.render(rate=None).splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[1], 'In:0 Out:0')
+        self.assertEqual(lines[2], 'Recent: —')
+
+    def test_unknown_speed_omitted_and_measured_zero_kept(self):
+        self.assertNotIn('Speed:', self.render(rate=None))
+        self.assertIn('Speed:0.0t/s', self.render(rate=0))
+
+    def test_zero_cache_omitted(self):
+        self.st['total_cache_read'] = 0
+        self.assertNotIn('Cache:', self.render())
+
+    def test_compact_has_fixed_rows_despite_detailed_toggles(self):
+        self.config['layout'].update(tools=False, recent=False)
+        self.assertEqual(len(self.render().splitlines()), 3)
+
+    def test_width_limits(self):
+        from formatting import _visible_len
+        for width in (10, 40, 80, 120):
+            with mock.patch('render.get_statusline_width_from_input', return_value=width):
+                lines = self.render().splitlines()
+            self.assertEqual(len(lines), 3)
+            self.assertTrue(all(_visible_len(line) <= width - 2 for line in lines))
+
+    def test_unknown_preset_uses_compact(self):
+        expected = self.render()
+        self.config['layout']['preset'] = 'unknown'
+        self.assertEqual(self.render(), expected)
+
+    def test_missing_or_invalid_config_uses_compact(self):
+        expected = self.render()
+        for config in (None, {}, {'layout': {}}, {'layout': None}, {'layout': 'bad'}):
+            with self.subTest(config=config):
+                with mock.patch('render.load_layout_config', return_value=config):
+                    self.assertEqual(self.render(), expected)
+
+    def test_explicit_detailed_preset(self):
+        self.config['layout']['preset'] = 'detailed'
+        output = self.render()
+        self.assertIn('Tools:', output)
+        self.assertIn('MCP(cfg):9', output)
+        self.assertIn('SECRET COMMAND', output)
 
 
 if __name__ == "__main__":

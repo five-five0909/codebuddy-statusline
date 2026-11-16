@@ -314,10 +314,10 @@ class TestTtyColumns(unittest.TestCase):
         # 0 (meaning "unknown width") rather than raising.
         import statusline
         # Force cache miss so _tty_columns re-reads /dev/tty
-        formatting._TTY_COLUMNS_CACHE = (0, 0.0)
-        with unittest.mock.patch('builtins.open', side_effect=OSError("no tty")):
-            w = _tty_columns()
-            self.assertEqual(w, 0)
+        with unittest.mock.patch.object(formatting, '_TTY_COLUMNS_CACHE', (0, 0.0)), \
+                unittest.mock.patch('formatting._read_tty_columns', return_value=0), \
+                unittest.mock.patch('formatting._windows_columns', return_value=0):
+            self.assertEqual(_tty_columns(), 0)
 
 class TestWindowsColumns(unittest.TestCase):
     """_windows_columns() tries /dev/tty then ctypes, returns 0 on failure."""
@@ -327,28 +327,80 @@ class TestWindowsColumns(unittest.TestCase):
         self.assertIsInstance(w, int)
         self.assertGreaterEqual(w, 0)
 
+    def _kernel(self, width=95, query_result=1):
+        import ctypes
+        from types import SimpleNamespace
+        kernel = unittest.mock.Mock()
+        kernel.GetStdHandle.return_value = 0
+        kernel.CreateFileW.return_value = 0x123456789
+
+        def query(handle, pointer):
+            if isinstance(query_result, Exception):
+                raise query_result
+            struct = kernel.GetConsoleScreenBufferInfo.argtypes[1]._type_
+            info = ctypes.cast(pointer, ctypes.POINTER(struct)).contents
+            info.dwSize.X = 300
+            info.srWindow.Left = 5
+            info.srWindow.Right = 5 + width - 1
+            return query_result
+
+        kernel.GetConsoleScreenBufferInfo.side_effect = query
+        for patcher in (
+                unittest.mock.patch('formatting._read_tty_columns', return_value=0),
+                unittest.mock.patch.object(ctypes, 'windll', SimpleNamespace(kernel32=kernel), create=True)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return kernel
+
     def test_returns_zero_when_no_tty_and_no_console(self):
-        # Mock /dev/tty to fail, mock GetConsoleScreenBufferInfo to fail
-        import statusline
-        with unittest.mock.patch('builtins.open', side_effect=OSError("no tty")):
-            # Also patch the kernel32 call to return failure
-            mock_kernel32 = unittest.mock.MagicMock()
-            mock_kernel32.GetConsoleScreenBufferInfo.return_value = 0
-            mock_kernel32.GetStdHandle.return_value = 0
-            with unittest.mock.patch.dict('sys.modules', {'ctypes.windll': unittest.mock.MagicMock(kernel32=mock_kernel32)}):
-                w = _windows_columns()
-                self.assertEqual(w, 0)
+        from ctypes import wintypes
+        kernel = self._kernel(query_result=0)
+        kernel.CreateFileW.return_value = wintypes.HANDLE(-1).value
+        self.assertEqual(_windows_columns(), 0)
+        kernel.CloseHandle.assert_not_called()
+
+    def test_pipe_handles_fall_back_to_conout(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel = self._kernel()
+        self.assertEqual(_windows_columns(), 95)
+        kernel.CreateFileW.assert_called_once_with('CONOUT$', 0x80000000, 3, None, 3, 0, None)
+        kernel.CloseHandle.assert_called_once_with(0x123456789)
+        self.assertEqual(kernel.GetStdHandle.restype, wintypes.HANDLE)
+        self.assertEqual(kernel.CreateFileW.restype, wintypes.HANDLE)
+        self.assertEqual(ctypes.sizeof(kernel.CreateFileW.restype), ctypes.sizeof(ctypes.c_void_p))
+
+    def test_standard_console_handle_is_not_closed(self):
+        kernel = self._kernel(width=101)
+        kernel.GetStdHandle.return_value = 0x123456789
+        self.assertEqual(_windows_columns(), 101)
+        kernel.CreateFileW.assert_not_called()
+        kernel.CloseHandle.assert_not_called()
+
+    def test_conout_query_failure_closes_handle(self):
+        kernel = self._kernel(query_result=0)
+        self.assertEqual(_windows_columns(), 0)
+        kernel.CloseHandle.assert_called_once_with(0x123456789)
+
+    def test_conout_query_exception_closes_handle(self):
+        kernel = self._kernel(query_result=OSError('query failed'))
+        self.assertEqual(_windows_columns(), 0)
+        kernel.CloseHandle.assert_called_once_with(0x123456789)
+
+    def test_conout_null_handle_is_not_closed(self):
+        kernel = self._kernel()
+        kernel.CreateFileW.return_value = None
+        self.assertEqual(_windows_columns(), 0)
+        kernel.CloseHandle.assert_not_called()
+
+    def test_conout_reflects_window_resize(self):
+        kernel = self._kernel(width=80)
+        self.assertEqual(_windows_columns(), 80)
+        kernel.GetConsoleScreenBufferInfo.side_effect = lambda handle, pointer: 0
+        self.assertEqual(_windows_columns(), 0)
 
     def test_dev_tty_tried_first(self):
-        # Verify /dev/tty is attempted by checking that open is called with it
-        calls = []
-        orig_open = open
-
-        def tracking_open(path, *args, **kwargs):
-            calls.append(str(path))
-            raise OSError("mock: no tty")
-
-        with unittest.mock.patch('builtins.open', side_effect=tracking_open):
-            _windows_columns()
-        self.assertTrue(any('/dev/tty' in c for c in calls),
-                        f"Expected /dev/tty in open calls, got: {calls}")
+        # Native Windows lacks fcntl; verify routing without requiring Unix imports.
+        with unittest.mock.patch('formatting._read_tty_columns', return_value=137) as read_tty:
+            self.assertEqual(_windows_columns(), 137)
+        read_tty.assert_called_once_with()

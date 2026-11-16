@@ -26,6 +26,7 @@ from formatting import (
     get_statusline_width_from_input,
     make_progress_bar,
     truncate_to_width,
+    _visible_len,
 )
 from gitinfo import format_git_info, get_git_info
 import stats
@@ -68,7 +69,7 @@ def _display_dir_name(cwd):
                 gd = gm.group(1)
                 if not os.path.isabs(gd):
                     gd = os.path.normpath(os.path.join(cwd, gd))
-                wm = _GIT_WORKTREE_GITDIR_RE.match(gd)
+                wm = _GIT_WORKTREE_GITDIR_RE.match(gd.replace('\\', '/'))
                 if wm:
                     return os.path.basename(wm.group('root')) or ""
     return os.path.basename(cwd) or ""
@@ -92,8 +93,8 @@ RECENT_CALLS_SUMMARY_LEN = 60
 # config file (<config-dir>/plugins/data/statusline/config.json, where
 # config-dir = CODEBUDDY_CONFIG_DIR or ~/.codebuddy) decides which blocks are
 # shown, their order on line 1, and whether the Tools/Recent lines are enabled.
-# With no config file, BLOCKS_LINE1 is the default layout and the output is
-# identical to the pre-config build.
+# With no config file, the compact three-line preset is used. The detailed
+# preset retains block ordering, hiding, and Tools/Recent line toggles.
 # ---------------------------------------------------------------------------
 
 def _config_path():
@@ -128,7 +129,7 @@ def resolve_layout(cfg):
         auto-appended to the end and shown, so new blocks never silently
         vanish for users with a custom config.
       - unknown ids in line1_order are ignored.
-      - missing/garbled config -> built-in defaults (all shown, both lines on).
+      - missing/garbled preset -> compact; explicit detailed enables block settings.
     """
     layout = cfg.get("layout", {}) if isinstance(cfg, dict) else {}
     if not isinstance(layout, dict):
@@ -156,7 +157,11 @@ def resolve_layout(cfg):
 
     tools = layout.get("tools", True)
     recent = layout.get("recent", True)
+    preset = layout.get('preset', 'compact')
+    if preset not in ('compact', 'detailed'):
+        preset = 'compact'
     return {
+        "preset": preset,
         "line1_order": order,
         "tools": bool(tools),
         "recent": bool(recent),
@@ -267,7 +272,7 @@ def _render_compact_periodic(input_data, stats_dict):
     return " ".join(parts)
 
 
-def _render_tokens(input_data, stats_dict):
+def _render_tokens(input_data, stats_dict, compact=False):
     # In/Out come from transcript parsing (main + sub-agents),
     # falling back to CodeBuddy's context_window values if transcript has no data.
     # Cache/Think have no context_window fallback — they only come from transcript parsing.
@@ -282,8 +287,9 @@ def _render_tokens(input_data, stats_dict):
     ]
     if display_cache > 0:
         cache_pct = int(display_cache / display_in * 100) if display_in > 0 else 0
-        token_parts.append(f"{DIM}Cache:{NC}{format_tokens(display_cache)}({cache_pct}%)")
-    if stats_dict.get('total_reasoning', 0) > 0:
+        cache_str = f'{cache_pct}%' if compact else f'{format_tokens(display_cache)}({cache_pct}%)'
+        token_parts.append(f"{DIM}Cache:{NC}{cache_str}")
+    if not compact and stats_dict.get('total_reasoning', 0) > 0:
         token_parts.append(f"{DIM}Think:{NC}{format_tokens(stats_dict['total_reasoning'])}")
     return " ".join(token_parts)
 
@@ -362,7 +368,7 @@ RENDERERS = {
 BLOCKS_LINE1 = list(RENDERERS.keys())
 
 
-def _build_recent_parts(input_data, stats_dict, recent_rate=None):
+def _build_recent_parts(input_data, stats_dict, recent_rate=None, compact=False):
     """Build line 3's Recent content (last-interaction detail + recent calls).
 
     *recent_rate* is the recent output rate (tokens/s) computed by the entry
@@ -376,6 +382,13 @@ def _build_recent_parts(input_data, stats_dict, recent_rate=None):
     last_cache = stats_dict.get('last_cache_read', 0) or 0
     last_credits = stats_dict.get('last_credits', 0) or 0
     last_cost = stats_dict.get('last_cost', 0) or 0
+    if compact:
+        if last_in > 0 or last_out > 0:
+            recent_parts.append(f'{GREEN}In:{NC}{format_tokens(last_in)} '
+                                f'{GREEN}Out:{NC}{format_tokens(last_out)}')
+        if recent_rate is not None:
+            recent_parts.append(f'{PURPLE}Speed:{NC}{recent_rate:.1f}t/s')
+        return recent_parts
     if last_in > 0 or last_out > 0:
         last_parts = [
             f"{GREEN}In:{NC}{format_tokens(last_in)}",
@@ -468,7 +481,55 @@ def format_recent_calls(recent_calls):
     return " | ".join(parts)
 
 
-def build_statusline(input_data, stats_dict, recent_rate=None):
+def _local_text(value):
+    if not isinstance(value, (str, int)):
+        return ''
+    text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]', '', str(value))
+    return ''.join(ch for ch in text if ch.isprintable()).strip()
+
+
+def _build_tools_line(stats_dict, metadata, width):
+    parts = []
+    permission = _local_text(metadata.get('permission_mode'))
+    if permission:
+        parts.append(f'{DIM}cfg:{NC}{permission}')
+    for key, label in (('mcp_count', 'MCP(cfg)'), ('skill_count', 'Skill(files)')):
+        if key in metadata:
+            value = metadata[key]
+            count = str(value) if type(value) is int and value >= 0 else '?'
+            parts.append(f'{DIM}{label}:{NC}{count}')
+    tool_str = format_tools(stats_dict.get('tool_counts', {}), stats_dict.get('running_agents', 0))
+    tools = f'{DIM}Tools:{NC} {tool_str or "—"}'
+    cwd = _local_text(metadata.get('cwd'))
+    if cwd:
+        if width > 0:
+            fixed = _visible_len(' | '.join(parts + [f'{DIM}Tools:{NC} '])) + 3
+            available = max(1, width - fixed)
+            cwd = truncate_to_width(cwd, max(1, available // 2) if tool_str else available)
+        parts.append(f'{CYAN}{cwd}{NC}')
+    parts.append(tools)
+    return ' | '.join(parts)
+
+
+def _build_compact_statusline(input_data, stats_dict, recent_rate, metadata):
+    model = input_data.get('model') or {}
+    name = _local_text(model.get('display_name') or model.get('id'))
+    name = truncate_to_width(name, 24)
+    effort = _local_text(metadata.get('reasoning_effort')).upper()
+    model_part = f'{BLUE}{name}{NC}' if name else ''
+    if effort:
+        model_part = ' '.join(part for part in (model_part, f'{DIM}{effort}{NC}') if part)
+    first = ' | '.join(part for part in (
+        _render_cwd_git(input_data, stats_dict), model_part,
+        _render_context_bar(input_data, stats_dict)) if part) or '—'
+    second = ' | '.join(part for part in (
+        _render_tokens(input_data, stats_dict, compact=True),
+        _render_time(input_data, stats_dict)) if part)
+    recent = _build_recent_parts(input_data, stats_dict, recent_rate, compact=True)
+    return '\n'.join((first, second, f'{DIM}Recent:{NC} {" | ".join(recent) or "—"}'))
+
+
+def build_statusline(input_data, stats_dict, recent_rate=None, local_metadata=None):
     """Assemble the full three-line statusline output from the parsed stats.
 
     Returns the string to print (already truncated to terminal width).
@@ -480,33 +541,40 @@ def build_statusline(input_data, stats_dict, recent_rate=None):
 
     The layout (which blocks show, their order, and whether the Tools/Recent
     lines are enabled) comes from the plugin config; see load_layout_config /
-    resolve_layout. With no config, BLOCKS_LINE1 is used and the output is
-    identical to the pre-config build.
+    resolve_layout. With no config, the compact three-line preset is used;
+    preset="detailed" enables configurable blocks and Tools/Recent lines.
     """
-    layout = resolve_layout(load_layout_config())
+    config = load_layout_config()
+    layout = resolve_layout(config)
+    compact = layout['preset'] == 'compact'
+    metadata = local_metadata or {}
+    width = get_statusline_width_from_input(input_data)
+    limit = max(1, width - 2) if width > 0 else 0
 
-    # Line 1: ordered, filtered blocks joined by " | ".
-    parts = []
-    for bid in layout["line1_order"]:
-        renderer = RENDERERS.get(bid)
-        if renderer is None:
-            continue
-        block = renderer(input_data, stats_dict)
-        if block:
-            parts.append(block)
-    output = " | ".join(parts)
+    if compact:
+        output = _build_compact_statusline(input_data, stats_dict, recent_rate, metadata)
+    else:
+        # Detailed layout retains the configurable blocks and line toggles.
+        parts = []
+        for bid in layout["line1_order"]:
+            renderer = RENDERERS.get(bid)
+            if renderer is None:
+                continue
+            block = renderer(input_data, stats_dict)
+            if bid == 'model' and block:
+                effort = _local_text(metadata.get('reasoning_effort'))
+                if effort:
+                    block += f' {DIM}cfg:{effort.upper()}{NC}'
+            if block:
+                parts.append(block)
+        output = " | ".join(parts)
 
-    # Line 2: Tools (with Agent running/completed status)
-    if layout["tools"]:
-        tool_str = format_tools(stats_dict.get('tool_counts', {}), stats_dict.get('running_agents', 0))
-        if tool_str:
-            output += f"\n{DIM}Tools:{NC} {tool_str}"
+        if layout["tools"]:
+            output += '\n' + _build_tools_line(stats_dict, metadata, limit)
 
-    # Line 3: Last interaction token details + Recent function calls
-    if layout["recent"]:
-        recent_parts = _build_recent_parts(input_data, stats_dict, recent_rate)
-        if recent_parts:
-            output += f"\n{DIM}Recent:{NC} {' | '.join(recent_parts)}"
+        if layout["recent"]:
+            recent_parts = _build_recent_parts(input_data, stats_dict, recent_rate)
+            output += f"\n{DIM}Recent:{NC} {' | '.join(recent_parts) or '—'}"
 
     # Truncate each line to terminal width so the renderer never wraps
     # a long line and visually squeezes the row below out of view.
@@ -514,10 +582,9 @@ def build_statusline(input_data, stats_dict, recent_rate=None):
     # Width comes from the host's reported terminal_width (stdin JSON)
     # with /dev/tty TIOCGWINSZ as fallback.
     # If width is 0 (no TTY, no fallback), skip truncation entirely.
-    width = get_statusline_width_from_input(input_data)
-    if width > 0:
+    if limit > 0:
         output = "\n".join(
-            truncate_to_width(line, max(20, width - 2))
+            truncate_to_width(line, limit)
             for line in output.split("\n")
         )
 

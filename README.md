@@ -42,11 +42,23 @@ powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codebuddy\statusline
 
 ## 效果预览
 
-状态栏分三行实时显示：
+默认使用精简三行布局，无需创建配置文件：
+
+```text
+project on main | GPT-6.1 Sol HIGH | █░░░░░░░░░ 16% 149.2K/922.0K
+In:5.3M Out:29.6K Cache:99% | Time:25m47s
+Recent: In:149.2K Out:241 | Speed:21.1t/s
+```
+
+第一行显示项目/Git、短模型名、配置中的推理强度和上下文；第二行显示累计用量、缓存命中率和耗时；第三行显示最近请求用量和输出吞吐。模型名及各行按显示列宽安全截断，速度无有效数据时省略。
+
+默认不显示完整路径、权限、MCP/Skill 数量、工具明细、费用和请求数。使用 `config.py preset detailed` 可切换到下面的详细布局；`config.py reset` 恢复默认精简布局。
+
+### 详细布局预览
 
 ![](docs/preview.webp)
 
-### 第一行：概览
+### 第一行：概览（详细布局）
 
 | 字段 | 说明 |
 |------|------|
@@ -156,6 +168,7 @@ python3 ~/.codebuddy/statusline/cost-detail.py
 ```jsonc
 {
   "layout": {
+    "preset": "detailed",
     "line1_order": ["cwd_git", "model", "context_bar", "compact_periodic",
                     "tokens", "requests", "cost", "credits", "time", "speed",
                     "lines"],
@@ -168,6 +181,7 @@ python3 ~/.codebuddy/statusline/cost-detail.py
 
 字段含义：
 
+- `preset`：`compact`（默认）为固定精简三行；`detailed` 为详细布局。以下顺序、隐藏和整行开关仅在详细布局生效。
 - `line1_order`：第一行各显示块的**顺序**。列出的块按此顺序显示。
 - `line1_hidden`：需要**隐藏**的块（即便出现在 `line1_order` 中也隐藏）。
 - `tools` / `recent`：第二行（工具调用）、第三行（最近交互）的整行开关。
@@ -186,7 +200,7 @@ tokens · requests · cost · credits · time · speed · lines
 1. **未知块自动追加到末尾**：代码里存在、但你的配置既没列出也没隐藏的块（例如未来版本新增的块），会自动追加到第一行末尾并显示——所以升级插件后新功能不会悄悄消失。
 2. **「漏写」≠「隐藏」**：仅仅把某个块从 `line1_order` 删掉，它**不会**消失，而是按规则 1 自动显示在末尾。要真正隐藏某块，必须把它放进 `line1_hidden`。
 
-配置文件在每次渲染时重新读取，修改后**下一次状态栏刷新即生效，无需重启会话**。配置文件损坏或格式错误时，自动回退到默认布局（全部显示），不会让状态栏变空白。
+配置文件在每次渲染时重新读取，修改后**下一次状态栏刷新即生效，无需重启会话**。配置文件损坏或格式错误时，自动回退到默认精简三行布局，不会让状态栏变空白。
 
 ### 用命令调整（推荐）
 

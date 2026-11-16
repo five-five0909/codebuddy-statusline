@@ -18,7 +18,8 @@ CodeBuddy Code 的 statusline 插件。stdin 接收状态 JSON → 增量解析 
 | `render.py` | 渲染：`format_tools`/`format_recent_calls`/`build_statusline`（三行装配）+ 布局配置 `load_layout_config`/`resolve_layout`/`RENDERERS`（块渲染器与顺序） |
 | `config.py` | 布局配置读写（`/statusline:config` 命令后端）：`hide`/`show`/`move`/`enable`/`disable`/`reset`/`list`，原子写入 |
 | `cost-detail.py` | 按模型分组的详细报告（独立脚本，需手动与 `parsing.py` 的 usage 提取逻辑同步） |
-| `test_*.py` | 按模块拆分的单元测试（共 251 用例）：`test_formatting`/`test_gitinfo`/`test_stats`/`test_parsing`/`test_render`/`test_config` + `test_statusline`（入口集成冒烟） |
+| `local_metadata.py` | 本地推理强度、配置权限及带60秒跨进程缓存的MCP/Skill文件计数（详细布局使用） |
+| `test_*.py` | 按模块拆分的单元测试（共 309 用例）：`test_formatting`/`test_gitinfo`/`test_stats`/`test_parsing`/`test_render`/`test_config` + `test_statusline`（入口集成冒烟） |
 | `install.sh`/`install.ps1` | 安装脚本（内外网双地址） |
 | `uninstall.sh`/`uninstall.ps1` | 卸载脚本 |
 | `commands/` | 斜杠命令定义 |
@@ -31,6 +32,8 @@ CodeBuddy 的 `StatusLineManager` 事件驱动 + 300ms 防抖。事件源：`ses
 
 ## 关键约束（改代码必看）
 
+- **默认布局**：未配置或无效 preset 使用 `compact` 固定精简三行：项目/Git+短模型+上下文、累计Token+缓存率+耗时、最近Token+Speed。`preset=detailed` 才启用原块排序、隐藏及Tools/Recent开关。`config.py preset compact|detailed` 切换，reset回到compact。
+- **Windows 编码与宽度**：stdin/stdout均须UTF-8；宿主可能不提供terminal_width且标准句柄是管道，宽度检测通过只读CONOUT$回退，按srWindow计算并关闭自有句柄，不能猜固定列数。
 - **null 安全**：`model`/`cost`/`context_window` 等字段可能是 `null`，统一用 `.get('key') or {}` 防护。
 - **模型元数据不全**：部分模型（如 hy4-dev）无最大上下文数据，`context_window_size=0` 且 `used_percentage` 为 `null`，但 `current_usage.input_tokens` 仍有值。此时 context_bar 回退显示当前用量（而非整块消失），不可把「无比例」当作「无数据」。
 - **`current_usage` 三段互不重叠**：当前上下文长度 = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`（Claude Code 协议）。`input_tokens` 只是未命中缓存的部分，缓存命中高时可能为 0，**不可只读它**。三段全缺失时才用 `百分比 × 上下文窗口大小` 兜底推导。

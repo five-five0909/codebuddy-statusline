@@ -291,7 +291,8 @@ def _windows_columns():
        redirection, and reflects the current window size.
     2. GetConsoleScreenBufferInfo via ctypes: reads srWindow from the
        console attached to stdout/stderr — live value, updates on resize.
-    3. Returns 0 (unknown) if neither source is available.  The caller
+    3. CONOUT$ reads the associated console even when both streams are pipes.
+    4. Returns 0 (unknown) if no source is available. The caller
        treats 0 as "skip truncation entirely", which is safer than
        truncating to a stale/guessed width.
 
@@ -334,6 +335,15 @@ def _windows_columns():
             ctypes.POINTER(CONSOLE_SCREEN_BUFFER_INFO),
         ]
         kernel32.GetConsoleScreenBufferInfo.restype = wintypes.BOOL
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
 
         INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 
@@ -347,10 +357,23 @@ def _windows_columns():
                 cols = csbi.srWindow.Right - csbi.srWindow.Left + 1
                 if cols > 0:
                     return cols
+
+        # Standard handles are pipes under the host; CONOUT$ still addresses
+        # its associated console without attaching or changing those handles.
+        h = kernel32.CreateFileW('CONOUT$', 0x80000000, 3, None, 3, 0, None)
+        if h and h != INVALID_HANDLE_VALUE:
+            try:
+                csbi = CONSOLE_SCREEN_BUFFER_INFO()
+                if kernel32.GetConsoleScreenBufferInfo(h, ctypes.byref(csbi)):
+                    cols = csbi.srWindow.Right - csbi.srWindow.Left + 1
+                    if cols > 0:
+                        return cols
+            finally:
+                kernel32.CloseHandle(h)
     except Exception:
         pass
 
-    # 3. No reliable live-width source — return 0 (skip truncation)
+    # No reliable live-width source — return 0 (skip truncation)
     return 0
 
 

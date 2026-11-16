@@ -190,6 +190,9 @@ class TestAutoUpdate(unittest.TestCase):
         self._orig_marker = stats.UPDATE_MARKER
         stats.CACHE_DIR = self.tmpdir
         stats.UPDATE_MARKER = os.path.join(self.tmpdir, ".last-update-check")
+        popen_patch = unittest.mock.patch('stats.subprocess.Popen')
+        popen_patch.start()
+        self.addCleanup(popen_patch.stop)
 
     def tearDown(self):
         import statusline
